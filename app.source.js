@@ -1,0 +1,267 @@
+/* Model is prepended by tools/build.mjs. No runtime dependencies. */
+const STORAGE_KEY = 'questionable-league:local:v2';
+const IS_TELEGRAM_LAUNCH = location.hash.includes('tgWebApp') || location.search.includes('tgWebApp');
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let state=createState();
+let storageWorks=true;
+let mode='local';
+let sessionToken='';
+let revision=0;
+let ready=false;
+let saving=false;
+let view=location.hash==='#profile'?'profile':'collection';
+let filters={tab:'all',rarity:'all',query:''};
+let toastTimer;
+let telegram=null;
+let lastDialogFocus;
+const dialog=$('#card-dialog');
+const remaining=()=>CARDS.length-state.owned.length;
+const featWord=n=>n%10===1 && n%100!==11?'подвиг':n%10>=2 && n%10<=4 && (n%100<12 || n%100>14)?'подвига':'подвигов';
+
+function toast(message) {
+  const el=$('#toast');el.textContent=message;el.classList.add('visible');
+  clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('visible'),5000);
+}
+async function api(path,{method='GET',data}={}) {
+  let response;
+  try {response=await fetch(path,{method,headers:{...(data?{'Content-Type':'application/json'}:{}),...(sessionToken?{'Authorization':`Bearer ${sessionToken}`}:{})},body:data?JSON.stringify(data):undefined,signal:AbortSignal.timeout(15000),cache:'no-store'});}
+  catch {throw new Error('Нет связи с сервером. Проверь соединение и обнови коллекцию перед повтором.');}
+  let body;
+  try {body=await response.json();} catch {throw new Error('Сервер прислал непонятный ответ. Попробуй позже.');}
+  if(!response.ok) {const error=new Error(body.error||'Не удалось выполнить действие.');error.status=response.status;throw error;}
+  return body;
+}
+function acceptState(result) {state=normalizeState(result.state);revision=result.revision;}
+async function changeState(path,method,data,localChange) {
+  if(saving) throw new Error('Дождись сохранения предыдущего действия.');
+  saving=true;document.body.setAttribute('aria-busy','true');
+  try {
+    if(mode==='telegram') {
+      try {acceptState(await api(path,{method,data:{...data,revision}}));}
+      catch(error) {
+        if(error.status===409) {acceptState(await api('/api/state'));if(dialog.open)closeDialog();render();}
+        throw error;
+      }
+    } else {
+      const next=localChange(state);
+      try {localStorage.setItem(STORAGE_KEY,JSON.stringify(next));storageWorks=true;}
+      catch {storageWorks=false;throw new Error('Браузер не разрешил сохранение. Разреши хранилище и повтори действие.');}
+      state=next;
+    }
+  } finally {saving=false;document.body.removeAttribute('aria-busy');}
+}
+function syncBackButton(){
+  if(!telegram?.BackButton)return;
+  if(dialog.open || view==='profile')telegram.BackButton.show();else telegram.BackButton.hide();
+}
+function ownerInitial(){return [...state.owner][0]?.toUpperCase() || 'Ч';}
+function updateHeader(){
+  document.querySelectorAll('[data-owner-name]').forEach(el=>el.textContent=state.owner);
+  document.querySelectorAll('[data-avatar]').forEach(el=>el.textContent=ownerInitial());
+  document.querySelectorAll('[data-view]').forEach(el=>{
+    el.classList.toggle('active',el.dataset.view===view);
+    if(el.closest('nav'))el.setAttribute('aria-current',el.dataset.view===view?'page':'false');
+  });
+}
+function cardHTML(card,{interactive=true,pinFlag=true}={}){
+  const owned=state.owned.includes(card.id);
+  const rarity=RARITIES[card.rarity];
+  const tag=interactive?'button':'div';
+  return `<article class="card-item ${card.rarity}" style="--rarity-color:${rarity.color}">
+    ${pinFlag && state.pinned.includes(card.id)?'<span class="pin-flag">В ВИТРИНЕ</span>':''}
+    <${tag} class="card-wrap" ${interactive?`type="button" data-card="${card.id}" aria-label="${esc(card.name.replace(/\n/g,' '))}, ${rarity.name}, рейтинг ${card.score}, ${owned?'получена':'ещё не получена'}"`:''}>
+      <div class="card-face">
+        <div class="card-base"></div><div class="card-inner"></div>
+        ${card.rarity==='secret'?'<div class="receipt-label">ЛИГА / ЧЕК ДОСТИЖЕНИЯ</div>':''}
+        <div class="card-top"><div class="rating">${card.score}<small>${card.rarity==='secret'?'СБОЙ':'ОБЩ'}</small></div><div><img class="card-shield" src="assets/crest.svg" alt=""><div class="card-number">№ ${card.number}</div></div></div>
+        <div class="portrait"><img src="assets/${card.id}.png" alt="" ${interactive?'loading="lazy"':''} draggable="false"></div>
+        <h3 class="card-title ${card.name.includes('\n')?'':'one-line'}">${esc(card.name).replace(/\n/g,'<br>')}</h3>
+        <div class="card-stats">${card.stats.map(([label,value])=>`<div><span class="stat-value">${value}</span><span class="stat-label">${label}</span></div>`).join('')}</div>
+        <div class="card-condition">${esc(card.short)}</div>
+        ${card.rarity==='secret'?'<div class="barcode" aria-hidden="true"></div>':''}
+        <div class="card-owner"><span class="owner-pixel">${esc(ownerInitial())}</span><span>${owned?esc(state.owner):'ТВОЁ ИМЯ ЗДЕСЬ'}</span><span class="mini-note">${owned?'ВЛАДЕЛЕЦ':'СВОБОДНЫЙ АГЕНТ'}</span></div>
+        ${['rare','epic','legendary'].includes(card.rarity)?'<div class="foil" aria-hidden="true"></div>':''}
+      </div>
+    </${tag}>
+    <div class="card-caption"><span class="rarity-label"><span class="rarity-symbol" aria-hidden="true">${rarity.symbol}</span>${rarity.name}</span><span class="${owned?'owned':'locked'}-indicator">${owned?'✓ ПОЛУЧЕНА':'＋ ПОЛУЧИТЬ'}</span></div>
+    <div class="card-bottom-note">${owned?'Отметил сам':'Доступна за подвиг'}</div>
+  </article>`;
+}
+function collectionHTML(){
+  return `<div class="eyebrow"><span class="live-dot"></span><b>${mode==='telegram'?'ЛИГА ДРУЗЕЙ':'ЛОКАЛЬНЫЙ ПРОСМОТР'}</b><span>/</span>СЕЗОН 01<span>/</span>ПЕРВЫЙ СОСТАВ</div>
+    <section class="hero"><div><h1>ТВОИ ПОДВИГИ.<br><span>В ВЫСШЕЙ ЛИГЕ.</span></h1><p>Серьёзные карточки за несерьёзно великие дела.<br>Собирай, гордись и немного преувеличивай пафос.</p></div><div class="hero-side"><div class="hero-badge"><img src="assets/crest.svg" alt="Пиксельный кубок лиги"></div><div class="score-panel"><div class="score-value">${String(state.owned.length).padStart(2,'0')}<span>/${String(CARDS.length).padStart(2,'0')}</span></div><p>подвигов<br>в коллекции</p></div></div></section>
+    ${!state.onboarded?`<section class="welcome-panel" aria-label="Знакомство с Лигой"><div><span class="eyebrow">ПЕРВЫЙ ВЫХОД НА ПОЛЕ</span><h2>${esc(state.owner)}, твой первый подвиг ждёт.</h2><p>Выбери карточку → выполни условие → отметь достижение. Здесь играют на доверии: каждую карточку ты получаешь сам, а три любимые собираешь в витрину.</p></div><button type="button" class="pixel-button" data-action="onboard">Выбрать первый подвиг</button></section>`:''}
+    <section aria-label="Коллекция карточек"><div class="collection-top"><div class="tab-group" role="group" aria-label="Какие карточки показать">
+      ${[['all','Все карточки',CARDS.length],['owned','Полученные',state.owned.length],['locked','Впереди',remaining()]].map(([key,label,count])=>`<button type="button" class="filter-tab ${filters.tab===key?'active':''}" data-tab="${key}" aria-pressed="${filters.tab===key}">${label}<b>${count}</b></button>`).join('')}
+    </div><button type="button" class="pixel-button" data-action="earn">＋ Заявить о подвиге</button></div>
+    <div class="toolbar"><label class="search-wrap"><span class="sr-only">Поиск карточек</span><input type="search" id="card-search" placeholder="Найти свой подвиг" maxlength="100" value="${esc(filters.query)}" autocomplete="off"></label><div class="toolbar-right"><span class="edition-note">${CARDS.length} ГЕРОЕВ. НИ ОДНОГО ОБЫЧНОГО ДНЯ.</span><label><span class="sr-only">Редкость карточки</span><select id="rarity-filter"><option value="all">Вся редкость</option>${Object.entries(RARITIES).map(([key,r])=>`<option value="${key}" ${filters.rarity===key?'selected':''}>${r.name}</option>`).join('')}</select></label></div></div>
+    <div class="cards-grid" id="cards-grid">${gridHTML()}</div></section>
+    <aside class="progress-strip"><div class="progress-copy">${remaining()===0?'<strong>Первый состав собран.</strong> Чемпион бытовой вселенной.':'До полного состава — <strong>ещё '+remaining()+' '+featWord(remaining())+'.</strong>'}<small>Здесь редкость задаёт характер карточки. Случайных паков нет.</small></div><div class="progress-pixels" aria-label="Собрано ${state.owned.length} из ${CARDS.length}">${CARDS.map(c=>`<i class="${state.owned.includes(c.id)?'done':''}"></i>`).join('')}<span>${state.owned.length} / ${CARDS.length}</span></div></aside>`;
+}
+function gridHTML(){
+  const cards=filterCards(state,filters);
+  return cards.length?cards.map(c=>cardHTML(c)).join(''):`<div class="empty-state"><h2>${filters.tab==='locked' && remaining()===0?'ВСЕ ПОДВИГИ В СБОРЕ':filters.tab==='owned' && !state.owned.length?'ПЕРВЫЙ ПОДВИГ ВПЕРЕДИ':'ТАКИХ ЧЕМПИОНОВ ПОКА НЕТ'}</h2><p>Попробуй изменить поиск или редкость.</p><button type="button" class="pixel-button secondary" data-action="clear-filters">Показать все карточки</button></div>`;
+}
+function profileHTML(){
+  const pinned=state.pinned.map(id=>CARDS.find(c=>c.id===id));
+  return `<div class="eyebrow"><span class="live-dot"></span><b>МОЯ ВИЗИТКА</b><span>/</span>ЛИЧНЫЙ ЗАЛ СЛАВЫ</div><section class="profile-header"><div class="profile-identity"><span class="avatar">${esc(ownerInitial())}</span><div><h1>${esc(state.owner)}</h1><p>Полузащитник повседневности</p><span class="profile-tag">◆ ${mode==='telegram'?'УЧАСТНИК ЛИГИ ДРУЗЕЙ':'ЛОКАЛЬНЫЙ ПРОСМОТР'}</span></div></div><div class="profile-stats"><div><b>${state.owned.length}</b><span>карточек</span></div><div><b>${state.pinned.length}/3</b><span>в витрине</span></div></div><button type="button" class="pixel-button secondary" data-action="edit-profile">Изменить имя</button></section>
+    <h2 class="section-title">ТВОЙ ПЕРВЫЙ СОСТАВ</h2><p class="section-sub">Три карточки, которые говорят за тебя. Закрепляй достижения в их подробном просмотре.</p><div class="cards-grid profile-cards">${pinned.map(c=>cardHTML(c,{pinFlag:false})).join('')}${Array.from({length:3-pinned.length},()=>'<button type="button" class="pin-slot" data-action="choose-pin"><span aria-hidden="true">＋</span>Место для<br>следующего подвига</button>').join('')}</div><div class="profile-actions"><button type="button" class="pixel-button" data-view="collection">Выбрать карточки</button>${mode==='local'?'<button type="button" class="pixel-button secondary" data-action="reset">Сбросить локальный просмотр</button>':'<button type="button" class="pixel-button secondary" data-action="refresh">Обновить коллекцию</button>'}</div><p class="profile-note">${mode==='telegram'?'Коллекция сохранена в твоём аккаунте Лиги. Открой приложение через этого же бота на другом устройстве — карточки будут на месте.':storageWorks?'Это локальный просмотр. Прогресс остаётся в этом браузере и не переносится в Telegram.':'Сохранение в этом браузере недоступно.'}</p>`;
+}
+function render(){
+  $('#main').innerHTML=view==='profile'?profileHTML():collectionHTML();
+  updateHeader();syncBackButton();
+  const footer=$('.app-footer [data-action="about"]');if(footer)footer.textContent=mode==='telegram'?'Лига друзей · сезон 01':'Локальный просмотр · сезон 01';
+}
+function showDialog(html,label){
+  const wasOpen=dialog.open;
+  if(!wasOpen)lastDialogFocus=document.activeElement;
+  dialog.innerHTML=`<button type="button" class="dialog-close" data-action="close" aria-label="Закрыть">×</button>${html}`;
+  dialog.setAttribute('aria-label',label);
+  if(!wasOpen)dialog.showModal();
+  dialog.scrollTop=0;
+  dialog.querySelector('.dialog-close')?.focus({preventScroll:true});
+  if(telegram?.BackButton){telegram.BackButton.show();}
+}
+function closeDialog(){dialog.close();}
+dialog.addEventListener('click',e=>{if(e.target===dialog)closeDialog();});
+dialog.addEventListener('close',()=>{syncBackButton();if(lastDialogFocus?.isConnected)lastDialogFocus.focus({preventScroll:true});});
+function showCard(id,celebrate=false){
+  const card=CARDS.find(c=>c.id===id);
+  if(!card)return;
+  const owned=state.owned.includes(id);
+  const story=state.stories[id] || '';
+  const date=state.dates[id];
+  const now=new Date();
+  const today=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  showDialog(`<div class="detail-layout"><div class="detail-card ${celebrate?'celebrate':''}">${cardHTML(card,{interactive:false,pinFlag:false})}</div><div class="detail-content"><div class="rarity-label" style="--rarity-color:${RARITIES[card.rarity].color}">${RARITIES[card.rarity].symbol} ${RARITIES[card.rarity].name.toUpperCase()} · № ${card.number}</div><p class="role">${card.role}</p><h2>${esc(card.name.replace(/\n/g,' '))}</h2><p class="quip">${esc(card.quip)}</p><div class="condition-box"><strong>УСЛОВИЕ ПОЛУЧЕНИЯ</strong><p>${esc(card.condition)}</p></div>
+    ${owned?`<span class="proof-badge">✓ Отметил сам</span>${story?`<p class="detail-story">${esc(story)}</p>`:''}${date?`<p class="detail-date">Дата подвига: ${new Date(date+'T12:00:00').toLocaleDateString('ru-RU')}</p>`:''}<div class="detail-actions"><button type="button" class="pixel-button" data-action="download" data-id="${id}">↓ Скачать карточку PNG</button><button type="button" class="pixel-button secondary" data-action="pin" data-id="${id}">${state.pinned.includes(id)?'− Убрать из витрины':'＋ Закрепить в витрине'}</button></div><p class="demo-note">Карточка с твоим именем. Можно сохранить и отправить друзьям. Подвиг отмечен самостоятельно.</p>`:
+    `<form id="claim-form" data-id="${id}"><label class="field">Твоя история <span aria-hidden="true">(необязательно)</span><textarea name="story" maxlength="400" rows="3" placeholder="Как всё было?"></textarea><span class="field-hint">До 400 символов. Без обязательных доказательств.</span></label><label class="field">Дата подвига<input type="date" name="date" max="${today}" value="${today}" required></label><button type="submit" class="pixel-button full">Да, это мой подвиг</button></form><p class="demo-note">${mode==='telegram'?'Карточка сохранится в твоей коллекции. История доступна только тебе.':'Карточка сохранится в этом браузере. Это локальный просмотр.'} Подтверждение — на твою честность.</p>`}
+    </div></div>`,card.name.replace(/\n/g,' '));
+}
+function showEarn(){
+  const available=CARDS.filter(c=>!state.owned.includes(c.id));
+  showDialog(`<div class="dialog-inner"><div class="eyebrow"><b>НОВАЯ КАРТОЧКА</b> / ЛИГА</div><h2>${available.length?'ЧЕМ ОТЛИЧИЛСЯ?':'СОСТАВ УЖЕ СОБРАН!'}</h2><p>${available.length?'Выбери свой подвиг. Рейтинг шуточный, а условие — вполне настоящее.':'Все герои этого набора уже у тебя. Можно выбрать любимые карточки для витрины.'}</p><div class="earn-list">${available.map(c=>`<button type="button" class="earn-option" data-card="${c.id}"><span class="option-score" style="color:${RARITIES[c.rarity].color}">${c.score}</span><span><strong>${esc(c.name.replace(/\n/g,' '))}</strong><small>${esc(c.short)} · ${RARITIES[c.rarity].name}</small></span><span class="arrow">→</span></button>`).join('')}</div>${!available.length?'<button type="button" class="pixel-button" data-view="profile">Мой профиль</button>':''}</div>`,'Заявить о подвиге');
+}
+function showRules(){
+  showDialog(`<div class="dialog-inner"><div class="eyebrow"><b>УСТАВ ЧЕМПИОНОВ</b> / 01</div><h2>ПАФОС — НАШ СПОРТ.</h2><p>Ты делаешь что-то настоящее. Мы выдаём этому неприлично серьёзную спортивную подачу. Общий рейтинг и характеристики — шутка, а не оценка человека.</p><div class="rule-list">${Object.entries(RARITIES).map(([,r])=>`<div class="rule-row"><strong style="color:${r.color}">${r.symbol} ${r.name}</strong><span>${r.subtitle}</span></div>`).join('')}</div><p>Обычная — за первый шаг. Эпическая — за выход к аудитории. Легендарная — за законченный проект. Секретная — за неожиданное бытовое условие. Редкость привязана к сюжету, а не к случайному выпадению или числу пользователей.</p><p>Коллекция начинается с нуля. Выполни условие, выбери дату и по желанию расскажи историю. Все отметки подписаны «отметил сам». Истории видны только тебе; друзьям можно отправить карточку в PNG.</p><button type="button" class="pixel-button full" data-action="close">Принимаю весь этот пафос</button></div>`,'Правила лиги');
+}
+function showEditProfile(){
+  showDialog(`<div class="dialog-inner"><h2>ИМЯ НА КАРТОЧКЕ</h2><p>Твоя подпись появится на всех полученных карточках. ${mode==='telegram'?'Имя сохранится в твоём аккаунте Лиги.':'Это имя для локального просмотра.'}</p><form id="profile-form"><label class="field">Имя коллекционера<input name="owner" value="${esc(state.owner)}" maxlength="32" required autocomplete="nickname"></label><button type="submit" class="pixel-button full">Сохранить имя</button></form></div>`,'Изменить имя');
+}
+function showReset(){showDialog(`<div class="dialog-inner"><h2>НОВЫЙ СЕЗОН?</h2><p>Локальная коллекция, имя и истории будут сброшены. Ты снова начнёшь с нуля. На Telegram-аккаунт это не повлияет.</p><div class="detail-actions"><button type="button" class="pixel-button" data-action="confirm-reset">Да, сбросить коллекцию</button><button type="button" class="pixel-button secondary" data-action="close">Оставить коллекцию</button></div></div>`,'Сброс локальной коллекции');}
+function navigate(next){
+  view=next==='profile'?'profile':'collection';
+  if(dialog.open)closeDialog();
+  if(!IS_TELEGRAM_LAUNCH && location.hash!==`#${view}`)history.replaceState(null,'',`#${view}`);
+  render();window.scrollTo({top:0,behavior:'instant'});
+}
+document.addEventListener('click',async e=>{
+  const el=e.target.closest('button,a.brand');if(!el)return;
+  if(el.dataset.action==='retry'){void boot();return;}
+  if(!ready || saving)return;
+  if(el.matches('a.brand')){e.preventDefault();navigate('collection');return;}
+  if(el.dataset.view){navigate(el.dataset.view);return;}
+  if(el.dataset.card){showCard(el.dataset.card);return;}
+  if(el.dataset.tab){filters.tab=el.dataset.tab;render();return;}
+  const action=el.dataset.action;if(!action)return;
+  try{
+    if(action==='close')closeDialog();
+    else if(action==='onboard'){await changeState('/api/onboarding','POST',{},s=>({...s,onboarded:true}));render();showEarn();}
+    else if(action==='refresh'){acceptState(await api('/api/state'));render();toast('Коллекция обновлена.');}
+    else if(action==='earn')showEarn();
+    else if(action==='rules'||action==='about')showRules();
+    else if(action==='clear-filters'){filters={tab:'all',rarity:'all',query:''};render();}
+    else if(action==='choose-pin'){filters={tab:'owned',rarity:'all',query:''};navigate('collection');toast('Открой карточку и нажми «Закрепить в витрине».');}
+    else if(action==='pin'){const id=el.dataset.id;await changeState(`/api/pins/${id}`,'PUT',{pinned:!state.pinned.includes(id)},s=>togglePin(s,id));render();showCard(id);toast(state.pinned.includes(el.dataset.id)?'Чемпион в твоём первом составе.':'Место в витрине освобождено.');}
+    else if(action==='edit-profile')showEditProfile();
+    else if(action==='reset' && mode==='local')showReset();
+    else if(action==='confirm-reset' && mode==='local'){await changeState('', 'POST',{},()=>createState());closeDialog();render();toast('Локальная коллекция сброшена.');}
+    else if(action==='download'){el.disabled=true;el.textContent='Готовим карточку…';try{await downloadCard(el.dataset.id);}finally{el.disabled=false;el.textContent='↓ Скачать карточку PNG';}}
+  }catch(error){toast(error.message||'Не получилось. Попробуй ещё раз.');}
+});
+document.addEventListener('input',e=>{if(e.target.id==='card-search'){filters.query=e.target.value;$('#cards-grid').innerHTML=gridHTML();}});
+document.addEventListener('change',e=>{if(e.target.id==='rarity-filter'){filters.rarity=e.target.value;$('#cards-grid').innerHTML=gridHTML();}});
+document.addEventListener('submit',async e=>{
+  if(e.target.id==='claim-form'){
+    e.preventDefault();if(!ready||saving)return;const data=new FormData(e.target);const id=e.target.dataset.id;const submit=e.target.querySelector('[type=submit]');submit.disabled=true;
+    try{await changeState(`/api/cards/${id}/claim`,'POST',{story:data.get('story'),date:data.get('date')},s=>receiveCard(s,id,data.get('story'),data.get('date')));render();showCard(id,true);try{telegram?.HapticFeedback?.notificationOccurred('success');}catch{}toast('КАРТОЧКА ТВОЯ. Коллекция сохранена.');}catch(error){toast(error.message);}finally{submit.disabled=false;}
+  }else if(e.target.id==='profile-form'){
+    e.preventDefault();if(!ready||saving)return;const owner=String(new FormData(e.target).get('owner')).trim();
+    if(!owner){toast('Нужно хотя бы одно имя.');return;}
+    try{await changeState('/api/profile','PATCH',{owner},s=>({...s,owner:owner.slice(0,32)}));closeDialog();render();toast('Подпись на карточках обновлена.');}catch(error){toast(error.message);}
+  }
+});
+window.addEventListener('hashchange',()=>{if(ready)navigate(location.hash==='#profile'?'profile':'collection');});
+
+async function downloadCard(id){
+  const card=CARDS.find(c=>c.id===id);
+  if(!card||!state.owned.includes(id))throw new Error('Сначала получи карточку');
+  await document.fonts.ready;
+  const image=new Image();image.src=`assets/${id}.png`;await image.decode();
+  const canvas=document.createElement('canvas');canvas.width=1080;canvas.height=1710;
+  const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;
+  const colors={common:['#d0ddcc','#20382a','#6d9176'],rare:['#1e5941','#d4ff9b','#a9dd61'],epic:['#a13e59','#fff0d1','#ffc0d8'],legendary:['#342438','#ffcf70','#d79c2d'],secret:['#e6e2ca','#303b31','#e6e2ca']};
+  const [bg,ink,edge]=colors[card.rarity];
+  ctx.fillStyle=edge;ctx.fillRect(12,0,1056,1710);ctx.fillRect(0,12,1080,1686);
+  ctx.fillStyle=bg;ctx.fillRect(20,20,1040,1670);
+  ctx.save();ctx.globalAlpha=.13;ctx.fillStyle=ink;for(let y=25;y<1685;y+=12)ctx.fillRect(20,y,1040,2);ctx.restore();
+  if(card.rarity==='rare'){ctx.save();ctx.globalAlpha=.18;ctx.fillStyle='#d8ffbc';for(let i=-1500;i<1300;i+=180){ctx.beginPath();ctx.moveTo(i,0);ctx.lineTo(i+50,0);ctx.lineTo(i+1500,1710);ctx.lineTo(i+1450,1710);ctx.fill();}ctx.restore();}
+  if(card.rarity==='epic'){ctx.save();ctx.translate(540,500);ctx.globalAlpha=.15;ctx.fillStyle='#ffd4a3';for(let i=0;i<16;i++){ctx.rotate(Math.PI/8);ctx.fillRect(0,-13,1100,26);}ctx.restore();}
+  ctx.fillStyle=ink;ctx.font='105px Pixel';ctx.fillText(String(card.score),65,165);ctx.font='25px monospace';ctx.fillText(card.rarity==='secret'?'СБОЙ':'ОБЩ',72,215);ctx.textAlign='right';ctx.font='22px Pixel';ctx.fillText('ЛСЧ',1010,95);ctx.font='25px monospace';ctx.fillText(`№ ${card.number}`,1010,145);ctx.textAlign='center';
+  const area={x:100,y:215,w:880,h:820};const ratio=Math.min(area.w/image.width,area.h/image.height);
+  if(card.rarity==='epic'){const width=1120;ctx.drawImage(image,-20,190,width,width*image.height/image.width);}
+  else ctx.drawImage(image,area.x+(area.w-image.width*ratio)/2,area.y+area.h-image.height*ratio,image.width*ratio,image.height*ratio);
+  ctx.fillStyle=bg;ctx.fillRect(35,1050,1010,600);
+  ctx.fillStyle=ink;ctx.font='43px Pixel';const lines=card.name.split('\n');lines.forEach((line,i)=>ctx.fillText(line,540,lines.length===1?1150:1100+i*75));
+  ctx.fillRect(75,1235,930,3);card.stats.forEach(([label,value],i)=>{const x=230+i*310;ctx.font='55px Pixel';ctx.fillText(String(value),x,1330);ctx.font='22px monospace';ctx.fillText(label,x,1382);});
+  ctx.font='29px monospace';wrapCanvasText(ctx,card.condition,540,1455,870,39);
+  if(card.rarity==='secret'){
+    ctx.font='21px Pixel';ctx.fillText('ЧЕК ДОСТИЖЕНИЯ',540,58);
+    for(let x=70;x<1010;x+=22)ctx.fillRect(x,244,12,2);
+    for(let x=315;x<765;x+=11){ctx.fillRect(x,1547,x%3===0?5:3,25);}
+  }
+  ctx.fillStyle=card.rarity==='secret'?'#e6e2ca':'#102419';ctx.fillRect(20,1595,1040,95);ctx.fillStyle=card.rarity==='secret'?'#303b31':'#e9f2db';ctx.font='30px monospace';ctx.fillText(`${state.owner} · ${RARITIES[card.rarity].name}`,540,1635,950);ctx.font='19px monospace';ctx.fillText('ЛИГА СОМНИТЕЛЬНЫХ ЧЕМПИОНОВ / ОТМЕТИЛ САМ',540,1672);
+  if(card.rarity==='secret'){ctx.fillStyle='#141916';for(let x=0;x<1080;x+=32){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x+16,12);ctx.lineTo(x+32,0);ctx.fill();ctx.beginPath();ctx.moveTo(x,1710);ctx.lineTo(x+16,1698);ctx.lineTo(x+32,1710);ctx.fill();}}
+  const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
+  if(!blob)throw new Error('Не удалось сохранить PNG');
+  const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`liga-${id}.png`;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(link.href),30000);toast('PNG готов. Отправь его друзьям из загрузок.');
+}
+function wrapCanvasText(ctx,text,x,y,maxWidth,lineHeight){let line='';for(const word of text.split(' ')){const next=line?line+' '+word:word;if(ctx.measureText(next).width>maxWidth&&line){ctx.fillText(line,x,y);line=word;y+=lineHeight;}else line=next;}if(line)ctx.fillText(line,x,y);}
+async function initTelegram(){
+  if(!window.Telegram?.WebApp){
+    await new Promise((resolve,reject)=>{
+      const script=document.createElement('script');script.src='https://telegram.org/js/telegram-web-app.js';script.async=true;
+      const timer=setTimeout(()=>{script.remove();reject(new Error('Telegram не ответил. Открой приложение ещё раз.'));},12000);
+      script.onload=()=>{clearTimeout(timer);resolve();};script.onerror=()=>{clearTimeout(timer);script.remove();reject(new Error('Не удалось загрузить Telegram. Проверь соединение.'));};document.head.append(script);
+    });
+  }
+  telegram=window.Telegram?.WebApp;
+  if(!telegram)throw new Error('Telegram недоступен. Открой приложение через бота.');
+  telegram.ready();telegram.expand();
+  if(telegram.isVersionAtLeast?.('6.1')){telegram.setHeaderColor('#141916');telegram.setBackgroundColor('#141916');}
+  telegram.BackButton?.offClick(handleBack);telegram.BackButton?.onClick(handleBack);
+}
+function handleBack(){if(dialog.open)closeDialog();else navigate('collection');}
+async function boot(){
+  ready=false;sessionToken='';if(dialog.open)closeDialog();
+  $('#main').innerHTML='<section class="connection-state" role="status"><div class="eyebrow">ЛИГА СОБИРАЕТ СОСТАВ</div><h1>Загружаем твою коллекцию…</h1></section>';
+  let config;
+  try {
+    config=location.protocol==='file:'?{mode:'local'}:await api('/api/config');
+    mode=config.mode;
+    if(mode==='telegram'){
+      await initTelegram();
+      if(!telegram.initData)throw new Error('Открой Лигу кнопкой «Открыть Лигу» в нашем Telegram-боте.');
+      const result=await api('/api/session',{method:'POST',data:{initData:telegram.initData}});
+      sessionToken=result.token;acceptState(result);
+    }else{
+      try{state=normalizeState(JSON.parse(localStorage.getItem(STORAGE_KEY)));}catch{state=createState();storageWorks=false;}
+    }
+    ready=true;render();
+  }catch(error){
+    const botLink=config?.botUsername?`<a class="pixel-button" href="https://t.me/${encodeURIComponent(config.botUsername)}">Открыть бота</a>`:'';
+    $('#main').innerHTML=`<section class="connection-state" role="alert"><div class="eyebrow">ЛИГА ДРУЗЕЙ</div><h1>Встретимся в Telegram</h1><p>${esc(error.message)}</p><div class="connection-actions">${botLink}<button type="button" class="pixel-button secondary" data-action="retry">Попробовать снова</button></div></section>`;
+  }
+}
+void boot();

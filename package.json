@@ -1,0 +1,18 @@
+{
+  "name": "questionable-champions-league",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.14.0 <25"
+  },
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "start": "node --env-file-if-exists=.env tools/server.mjs",
+    "test": "node --test tools/*.test.mjs",
+    "bot": "node --env-file-if-exists=.env tools/bot.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}

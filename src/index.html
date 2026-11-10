@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#141916">
+  <meta name="description" content="Лига сомнительных чемпионов. Пиксельные карточки за твои повседневные подвиги.">
+  <title>Лига сомнительных чемпионов</title>
+  <link rel="icon" type="image/svg+xml" href="assets/crest.svg">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="#collection" aria-label="Лига сомнительных чемпионов — коллекция">
+      <img src="assets/crest.svg" width="44" height="48" alt="">
+      <span>ЛИГА СОМНИТЕЛЬНЫХ<br>ЧЕМПИОНОВ<span class="brand-sub">МАЛЕНЬКИЕ ПОДВИГИ. БОЛЬШАЯ ИГРА.</span></span>
+    </a>
+    <nav class="desktop-nav" aria-label="Основная навигация">
+      <button type="button" data-view="collection" class="nav-item active">Коллекция</button>
+      <button type="button" data-view="profile" class="nav-item">Мой профиль</button>
+      <button type="button" data-action="rules" class="nav-item">Правила лиги <span aria-hidden="true">↗</span></button>
+    </nav>
+    <button type="button" class="user-chip" data-view="profile" aria-label="Открыть мой профиль"><span class="avatar small" data-avatar>Ч</span><span data-owner-name>Чемпион</span><span class="online-dot" aria-hidden="true"></span></button>
+  </header>
+  <main id="main"></main>
+  <footer class="app-footer"><span><span class="spark" aria-hidden="true">✦</span> ЗДЕСЬ ДАЖЕ ПОНЕДЕЛЬНИК — СПОРТ.</span><button type="button" data-action="about">Лига друзей · сезон 01</button></footer>
+  <nav class="mobile-nav" aria-label="Основная навигация"><button type="button" data-view="collection" class="active"><span aria-hidden="true">▦</span>Коллекция</button><button type="button" data-action="earn"><span class="mobile-plus" aria-hidden="true">+</span>Мой подвиг</button><button type="button" data-view="profile"><span aria-hidden="true">▣</span>Профиль</button></nav>
+  <dialog id="card-dialog" aria-label="Карточка достижения"></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
